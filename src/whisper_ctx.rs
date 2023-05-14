@@ -88,12 +88,15 @@ impl WhisperContext {
         text: &str,
         max_tokens: usize,
     ) -> Result<Vec<WhisperToken>, WhisperError> {
+        // convert the text to a nul-terminated C string. Will raise an error if the text contains
+        // any nul bytes.
+        let text = CString::new(text)?;
         // allocate at least max_tokens to ensure the memory is valid
         let mut tokens: Vec<WhisperToken> = Vec::with_capacity(max_tokens);
         let ret = unsafe {
             whisper_rs_sys::whisper_tokenize(
                 self.ctx,
-                text.as_ptr() as *const _,
+                text.as_ptr(),
                 tokens.as_mut_ptr(),
                 max_tokens as c_int,
             )
@@ -272,16 +275,16 @@ impl WhisperContext {
         unsafe { whisper_rs_sys::whisper_model_n_mels(self.ctx) }
     }
 
-    /// Get model_f16.
+    /// Get model_ftype.
     ///
     /// # Returns
     /// c_int
     ///
     /// # C++ equivalent
-    /// `int whisper_model_f16          (struct whisper_context * ctx);`
+    /// `int whisper_model_ftype          (struct whisper_context * ctx);`
     #[inline]
-    pub fn model_f16(&self) -> c_int {
-        unsafe { whisper_rs_sys::whisper_model_f16(self.ctx) }
+    pub fn model_ftype(&self) -> c_int {
+        unsafe { whisper_rs_sys::whisper_model_ftype(self.ctx) }
     }
 
     /// Get model_type.
@@ -296,8 +299,24 @@ impl WhisperContext {
         unsafe { whisper_rs_sys::whisper_model_type(self.ctx) }
     }
 
-    /// token functions
+    // token functions
     /// Convert a token ID to a string.
+    ///
+    /// # Arguments
+    /// * token_id: ID of the token.
+    ///
+    /// # Returns
+    /// Ok(&str) on success, Err(WhisperError) on failure.
+    ///
+    /// # C++ equivalent
+    /// `const char * whisper_token_to_str(struct whisper_context * ctx, whisper_token token)`
+    pub fn token_to_str(&self, token_id: WhisperToken) -> Result<&str, WhisperError> {
+        let c_str = self.token_to_cstr(token_id)?;
+        let r_str = c_str.to_str()?;
+        Ok(r_str)
+    }
+
+    /// Convert a token ID to a &CStr.
     ///
     /// # Arguments
     /// * token_id: ID of the token.
@@ -307,14 +326,12 @@ impl WhisperContext {
     ///
     /// # C++ equivalent
     /// `const char * whisper_token_to_str(struct whisper_context * ctx, whisper_token token)`
-    pub fn token_to_str(&self, token_id: WhisperToken) -> Result<String, WhisperError> {
+    pub fn token_to_cstr(&self, token_id: WhisperToken) -> Result<&CStr, WhisperError> {
         let ret = unsafe { whisper_rs_sys::whisper_token_to_str(self.ctx, token_id) };
         if ret.is_null() {
             return Err(WhisperError::NullPointer);
         }
-        let c_str = unsafe { CStr::from_ptr(ret) };
-        let r_str = c_str.to_str()?;
-        Ok(r_str.to_string())
+        Ok(unsafe { CStr::from_ptr(ret) })
     }
 
     /// Undocumented but exposed function in the C++ API.
@@ -428,3 +445,26 @@ impl Drop for WhisperContext {
 // see https://github.com/ggerganov/whisper.cpp/issues/32#issuecomment-1272790388
 unsafe impl Send for WhisperContext {}
 unsafe impl Sync for WhisperContext {}
+
+#[cfg(test)]
+#[cfg(feature = "test-with-tiny-model")]
+mod test_with_tiny_model {
+    use super::*;
+    const MODEL_PATH: &str = "./sys/whisper.cpp/models/ggml-tiny.en.bin";
+
+    // These tests expect that the tiny.en model has been downloaded
+    // using the script `sys/whisper.cpp/models/download-ggml-model.sh tiny.en`
+
+    #[test]
+    fn test_tokenize_round_trip() {
+        let ctx = WhisperContext::new(MODEL_PATH).expect("Download the ggml-tiny.en model using 'sys/whisper.cpp/models/download-ggml-model.sh tiny.en'");
+        let text_in = " And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.";
+        let tokens = ctx.tokenize(text_in, 1024).unwrap();
+        let text_out = tokens
+            .into_iter()
+            .map(|t| ctx.token_to_str(t).unwrap())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(text_in, text_out);
+    }
+}
